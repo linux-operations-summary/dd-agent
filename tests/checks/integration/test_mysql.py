@@ -16,6 +16,7 @@ class TestMySql(AgentCheckTest):
 
     MYSQL_CONFIG = [{
         'server': 'localhost',
+        'port': 3308,
         'user': 'dog',
         'pass': 'dog',
         'options': {

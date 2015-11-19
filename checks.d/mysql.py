@@ -432,6 +432,7 @@ class MySql(AgentCheck):
                 VARS.update(OPTIONAL_STATUS_VARS_5_6_6)
 
         if 'galera_cluster' in options and options['galera_cluster']:
+            # already in result-set after 'SHOW STATUS' just add vars to collect
             self.log.debug("Collecting Galera Metrics.")
             VARS.update(GALERA_VARS)
 
