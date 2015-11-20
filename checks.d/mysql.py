@@ -16,6 +16,8 @@ from utils.subprocess_output import get_subprocess_output
 GAUGE = "gauge"
 RATE = "rate"
 
+VER_5_7 = (5, 7, 0)
+
 # Vars found in "SHOW STATUS;"
 STATUS_VARS = {
     # Command Metrics
@@ -246,6 +248,10 @@ PERFORMANCE_VARS = {
     'perf_digest_95th_percentile_avg_us': ('mysql.performance.digest_95th_percentile.avg_us', GAUGE),
 }
 
+SCHEMA_VARS = {
+    'information_schema_size': ('mysql.info.schema.size', GAUGE),
+}
+
 REPLICA_VARS = {
     'Seconds_Behind_Master': ('mysql.replication.seconds_behind_master', GAUGE),
 }
@@ -443,17 +449,27 @@ class MySql(AgentCheck):
             schemas = {}
             try:
                 results['perf_digest_95th_percentile_avg_us'] = self._get_query_exec_time_95th_us(db)
-                schema_perf = self._query_exec_time_per_schema(db)
-                for schema, avg in schema_perf.iteritems():
-                    schemas["schema:{0}".format(schema)] = avg
-                results['query_run_time_avg'] = schemas
+                results['query_run_time_avg'] = self._query_exec_time_per_schema(db)
                 VARS.update(PERFORMANCE_VARS)
             except Exception as e:
                 self.log.debug("Performance metrics unavailable at this time: {0}".format(e))
 
+        if 'schema_size_metrics' in options and options['schema_size_metrics']:
+            # report avg query response time per schema to Datadog
+            schemas = {}
+            try:
+                results['information_schema_size'] = self._query_size_per_schema(db)
+                VARS.update(SCHEMA_VARS)
+            except Exception as e:
+                self.log.debug("Schema size metrics unavailable at this time: {0}".format(e))
+
 
 
         if 'replication' in options and options['replication']:
+            # Get replica stats
+            results.update(self._get_replica_stats(db))
+            VARS.update(REPLICA_VARS)
+
             # get slave running form global status page
             slave_running_status = AgentCheck.UNKNOWN
             slave_running = self._collect_string('Slave_running', results)
@@ -466,12 +482,32 @@ class MySql(AgentCheck):
                     slave_running_status = AgentCheck.CRITICAL
                 # deprecated in favor of service_check("mysql.replication.slave_running")
                 self.gauge(self.SLAVE_SERVICE_CHECK_NAME, slave_running, tags=tags)
+            else:
+                # MySQL 5.7.x might not have 'Slave_running'. See: https://bugs.mysql.com/bug.php?id=78544
+                # look at replica vars collected at the top of if-block
+                ver = self._get_version(db, host)
+                if (ver[0], ver[1], ver[2]) >= VER_5_7:
+                    slave_io_running = self._collect_string('Slave_IO_Running', results)
+                    slave_sql_running = self._collect_string('Slave_SQL_Running', results)
+                    if slave_io_running:
+                        slave_io_running = (slave_io_running.lower.strip() == "yes")
+                    if slave_sql_running:
+                        slave_sql_running = (slave_sql_running.lower.strip() == "yes")
+
+                    if not (slave_io_running is None and slave_sql_running is None):
+                        if slave_io_running and slave_sql_running:
+                            slave_running = 1
+                            slave_running_status = AgentCheck.OK
+                        elif not slave_io_running and not slave_sql_running:
+                            slave_running = 0
+                            slave_running_status = AgentCheck.CRITICAL
+                        else:
+                            # not everything is running smoothly
+                            slave_running = 1
+                            slave_running_status = AgentCheck.WARNING
 
             self.service_check(self.SLAVE_SERVICE_CHECK_NAME, slave_running_status, tags=tags)
 
-            # Get replica stats
-            results.update(self._get_replica_stats(db))
-            VARS.update(REPLICA_VARS)
 
         self._rate_or_gauge_vars(VARS, results, tags)
 
@@ -1196,9 +1232,40 @@ class MySql(AgentCheck):
             schema_name = str(row[0])
             avg_us = long(row[2])
 
-            schema_query_avg_run_time[schema_name] = avg_us
+            # set the tag as the dictionary key
+            schema_query_avg_run_time["schema:{0}".format(schema_name)] = avg_us
 
         cursor.close()
         del cursor
 
         return schema_query_avg_run_time
+
+    def _query_size_per_schema(self, db):
+        # Fetches the avg query execution time per schema and returns the
+        # value in microseconds
+
+        sql_query_schema_size = """
+        SELECT   table_schema,
+                 SUM(data_length+index_length)/1024/1024 AS total_mb
+                 FROM     information_schema.tables
+                 GROUP BY table_schema;
+        """
+
+        cursor = db.cursor()
+        cursor.execute(sql_query_schema_size)
+
+        if cursor.rowcount < 1:
+            raise Exception("Failed to fetch records from the information schema 'tables' table.")
+
+        schema_size = {}
+        for row in cursor.fetchall():
+            schema_name = str(row[0])
+            size = long(row[1])
+
+            # set the tag as the dictionary key
+            schema_size["schema:{0}".format(schema_name)] = size
+
+        cursor.close()
+        del cursor
+
+        return schema_size
