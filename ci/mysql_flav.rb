@@ -27,17 +27,9 @@ namespace :ci do
              https://dev.mysql.com/get/Downloads/MySQL-5.7/mysql-#{mysql_version}-#{target}-x86_64.tar.gz)
 
              #https://s3.amazonaws.com/dd-agent-tarball-mirror/#{pg_version}.tar.gz)
-        if `uname`.strip == 'Darwin'
-          sh %(tar zxf $VOLATILE_DIR/mysql-#{mysql_version}.tar.gz\
+        sh %(mkdir -p #{mysql_rootdir})
+        sh %(tar zxf $VOLATILE_DIR/mysql-#{mysql_version}.tar.gz\
                -C #{mysql_rootdir} --strip-components=1)
-        else
-          sh %(mkdir -p $VOLATILE_DIR/mysql)
-          sh %(tar zxf $VOLATILE_DIR/mysql-#{mysql_version}.tar.gz\
-               -C $VOLATILE_DIR/mysql --strip-components=1)
-          sh %(cd $VOLATILE_DIR/mysql \
-               && cmake . -LH -DCMAKE_INSTALL_PREFIX=#{mysql_rootdir} \
-               && ccmake .)
-        end
       end
     end
 
@@ -45,7 +37,9 @@ namespace :ci do
       # does travis have any mysql instance already running? :X
       # use another port?
       sh %(mkdir -p #{mysql_rootdir}/data)
+      sh %(mkdir -p #{mysql_rootdir}/data_replica)
       sh %(#{mysql_rootdir}/bin/mysqld --no-defaults --initialize --basedir=#{mysql_rootdir} --datadir=#{mysql_rootdir}/data --plugin-dir=#{mysql_rootdir}/lib/plugin --log-error=#{mysql_rootdir}/data/mysql-init.err --socket=#{mysql_rootdir}/data/mysql.sock --pid-file=#{mysql_rootdir}/data/mysqld_safe.pid --port=3308 --performance-schema)
+      sh %(#{mysql_rootdir}/bin/mysqld --no-defaults --initialize --basedir=#{mysql_rootdir} --datadir=#{mysql_rootdir}/data_replica --plugin-dir=#{mysql_rootdir}/lib/plugin --log-error=#{mysql_rootdir}/data_replica/mysql-init.err --socket=#{mysql_rootdir}/data_replica/mysql.sock --pid-file=#{mysql_rootdir}/data_replica/mysqld_safe.pid --port=3310 --performance-schema)
       sleep_for 5
       `pgrep -f "#{mysql_rootdir}/bin/mysqld" `.split("\n").each do |spid|
           p = spid.to_i
@@ -54,19 +48,35 @@ namespace :ci do
       end
       sleep_for 2
       passwd = ''
+      passwd_replica = ''
       File.open("#{mysql_rootdir}/data/mysql-init.err").each do |line|
           if match = line.match("A temporary password is generated for root@localhost: (.*)$")
               passwd = match.captures.first
               break
           end
       end
+      File.open("#{mysql_rootdir}/data_replica/mysql-init.err").each do |line|
+          if match = line.match("A temporary password is generated for root@localhost: (.*)$")
+              passwd_replica = match.captures.first
+              break
+          end
+      end
 
-      sh %(#{mysql_rootdir}/bin/mysqld --no-defaults --basedir=#{mysql_rootdir} --datadir=#{mysql_rootdir}/data --log-error=#{mysql_rootdir}/data/mysql.err --socket=#{mysql_rootdir}/data/mysql.sock --pid-file=#{mysql_rootdir}/data/mysqld_safe.pid --port=3308 --performance-schema --daemonize >/dev/null 2>&1)
+      sh %(#{mysql_rootdir}/bin/mysqld --no-defaults --basedir=#{mysql_rootdir} --datadir=#{mysql_rootdir}/data --log-error=#{mysql_rootdir}/data/mysql.err --plugin-dir=#{mysql_rootdir}/lib/plugin --socket=#{mysql_rootdir}/data/mysql.sock --pid-file=#{mysql_rootdir}/data/mysqld_safe.pid --port=3308 --log-bin=mysql-bin --server-id=1 --performance-schema --daemonize >/dev/null 2>&1)
+      sh %(#{mysql_rootdir}/bin/mysqld --no-defaults --basedir=#{mysql_rootdir} --datadir=#{mysql_rootdir}/data_replica --log-error=#{mysql_rootdir}/data_replica/mysql.err --socket=#{mysql_rootdir}/data_replica/mysql.sock --pid-file=#{mysql_rootdir}/data_replica/mysqld_safe.pid --port=3310 --server-id=2 --performance-schema --daemonize >/dev/null 2>&1)
       Wait.for 33_08, 10
+      Wait.for 33_10, 10
       #reset root password
       sh %(#{mysql_rootdir}/bin/mysql --connect-expired-password -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('');" -uroot -p'#{passwd}' --socket=#{mysql_rootdir}/data/mysql.sock)
+      sh %(#{mysql_rootdir}/bin/mysql --connect-expired-password -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('');" -uroot -p'#{passwd_replica}' --socket=#{mysql_rootdir}/data_replica/mysql.sock)
+      # set-up replication
+      sh %(#{mysql_rootdir}/bin/mysql -e "CREATE USER 'repl'@'%' IDENTIFIED BY 'slavedog';" -u root --socket=#{mysql_rootdir}/data/mysql.sock)
+      sh %(#{mysql_rootdir}/bin/mysql -e "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';" -u root --socket=#{mysql_rootdir}/data/mysql.sock)
       sh %(#{mysql_rootdir}/bin/mysql -e "create user 'dog'@'localhost' identified by 'dog'" -uroot --socket=#{mysql_rootdir}/data/mysql.sock)
       sh %(#{mysql_rootdir}/bin/mysql -e "GRANT PROCESS, REPLICATION CLIENT ON *.* TO 'dog'@'localhost' WITH MAX_USER_CONNECTIONS 5;" -uroot --socket=#{mysql_rootdir}/data/mysql.sock)
+      sh %(#{mysql_rootdir}/bin/mysql -e "CHANGE MASTER TO MASTER_HOST='localhost', MASTER_USER='repl', MASTER_PASSWORD='slavedog', MASTER_LOG_FILE='mysql-bin.000001', MASTER_LOG_POS=1291;" -uroot --socket=#{mysql_rootdir}/data_replica/mysql.sock)
+      sh %(#{mysql_rootdir}/bin/mysql -e "START SLAVE;" -uroot --socket=#{mysql_rootdir}/data_replica/mysql.sock)
+      # lets add some data to our master.
       sh %(#{mysql_rootdir}/bin/mysql -e "CREATE DATABASE testdb;" -uroot --socket=#{mysql_rootdir}/data/mysql.sock)
       sh %(#{mysql_rootdir}/bin/mysql -e "CREATE TABLE testdb.users (name VARCHAR(20), age INT);" -uroot --socket=#{mysql_rootdir}/data/mysql.sock)
       sh %(#{mysql_rootdir}/bin/mysql -e "GRANT SELECT ON testdb.users TO 'dog'@'localhost';" -uroot --socket=#{mysql_rootdir}/data/mysql.sock)
@@ -97,6 +107,7 @@ namespace :ci do
           Process.kill "TERM", p
       end
       sh %(rm -rf #{mysql_rootdir}/data)
+      sh %(rm -rf #{mysql_rootdir}/data_replica)
     end
 
     task :execute do

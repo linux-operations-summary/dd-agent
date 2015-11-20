@@ -12,7 +12,7 @@ class TestMySql(AgentCheckTest):
     CHECK_NAME = 'mysql'
 
     METRIC_TAGS = ['tag1', 'tag2']
-    SC_TAGS = ['server:localhost', 'port:0']
+    SC_TAGS = ['server:localhost', 'port:3308']
 
     MYSQL_CONFIG = [{
         'server': 'localhost',
@@ -23,7 +23,8 @@ class TestMySql(AgentCheckTest):
             'replication': True,
             'extra_status_metrics': True,
             'extra_innodb_metrics': True,
-            'extra_performance_metrics': True
+            'extra_performance_metrics': True,
+            'schema_size_metrics': True,
         },
         'tags': METRIC_TAGS,
         'queries': [
@@ -44,6 +45,7 @@ class TestMySql(AgentCheckTest):
 
     CONNECTION_FAILURE = [{
         'server': 'localhost',
+        'port': 3308,
         'user': 'unknown',
         'pass': 'dog',
     }]
@@ -277,6 +279,10 @@ class TestMySql(AgentCheckTest):
         'mysql.performance.digest_95th_percentile.avg_us',
     ]
 
+    SCHEMA_VARS = [
+        'mysql.info.schema.size'
+    ]
+
     def _test_optional_metrics(self, optional_metrics, at_least):
         """
         Check optional metrics - there should be at least `at_least` matches
@@ -300,12 +306,13 @@ class TestMySql(AgentCheckTest):
         self.assertServiceCheck('mysql.can_connect', status=AgentCheck.OK,
                                 tags=self.SC_TAGS, count=1)
 
-        self.assertServiceCheck('mysql.replication.slave_running', status=AgentCheck.CRITICAL,
+        self.assertServiceCheck('mysql.replication.slave_running', status=AgentCheck.UNKNOWN,
                                 tags=self.METRIC_TAGS, count=1)
 
         # Test metrics
         for mname in (self.STATUS_VARS + self.VARIABLES_VARS + self.INNODB_VARS
-                      + self.BINLOG_VARS + self.SYSTEM_METRICS + self.PERFORMANCE_VARS):
+                      + self.BINLOG_VARS + self.SYSTEM_METRICS + self.PERFORMANCE_VARS
+                      + self.SCHEMA_VARS):
             # These two are currently not guaranteed outside of a Linux
             # environment.
             if mname == 'mysql.performance.user_time' and not Platform.is_linux():
@@ -315,7 +322,7 @@ class TestMySql(AgentCheckTest):
             if mname == 'mysql.performance.cpu_time' and Platform.is_windows():
                 continue
 
-            if mname == 'mysql.performance.query_run_time.avg':
+            if mname == 'mysql.performance.query_run_time.avg' or mname == 'mysql.info.schema.size':
                 self.assertMetric(mname, tags=self.METRIC_TAGS+['schema:testdb'], count=1)
             else:
                 self.assertMetric(mname, tags=self.METRIC_TAGS, count=1)
