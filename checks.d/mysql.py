@@ -463,8 +463,6 @@ class MySql(AgentCheck):
             except Exception as e:
                 self.log.debug("Schema size metrics unavailable at this time: {0}".format(e))
 
-
-
         if 'replication' in options and options['replication']:
             # Get replica stats
             results.update(self._get_replica_stats(db))
@@ -593,7 +591,7 @@ class MySql(AgentCheck):
         return version
 
     def _collect_all_scalars(self, key, dictionary):
-        if key not in dictionary:
+        if (key not in dictionary) or (dictionary[key] is None):
             yield None, None
         elif isinstance(dictionary[key], dict):
             for tag, _ in dictionary[key].iteritems():
